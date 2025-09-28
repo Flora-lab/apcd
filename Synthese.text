@@ -1,0 +1,580 @@
+ÉTAPE 1 : Créer le backend Laravel 10
+
+1️⃣ Crée le dossier API :
+
+composer create-project laravel/laravel apcd-api "10.*"
+cd apcd-api
+
+
+2️⃣ Configure la base de données dans .env :
+
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=apcd
+DB_USERNAME=root
+DB_PASSWORD=
+
+
+3️⃣ Crée la base dans MySQL :
+
+CREATE DATABASE apcd;
+
+
+4️⃣ Installe Sanctum pour l’authentification :
+
+composer require laravel/sanctum
+php artisan vendor:publish --provider="Laravel\Sanctum\SanctumServiceProvider"
+php artisan migrate
+
+
+5️⃣ Installe WebSockets pour le chat en temps réel :
+
+composer require beyondcode/laravel-websockets --with-all-dependencies
+php artisan vendor:publish --provider="BeyondCode\LaravelWebSockets\WebSocketsServiceProvider"
+php artisan migrate
+
+
+6️⃣ Lance le serveur Laravel et le serveur WebSockets :
+
+php artisan serve
+php artisan websockets:serve
+
+ÉTAPE 2 : Créer le frontend React + TypeScript
+
+1️⃣ Crée le projet Vite + React + TS :
+
+npm create vite@latest apcd-client -- --template react-ts
+cd apcd-client
+
+
+2️⃣ Installe les dépendances principales :
+
+npm i axios react-router-dom @tanstack/react-query zustand
+
+
+3️⃣ Installe Tailwind CSS :
+
+npm i -D tailwindcss postcss autoprefixer
+npx tailwindcss init -p
+
+
+4️⃣ Configure Tailwind dans tailwind.config.js :
+
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: { extend: {} },
+  plugins: [],
+};
+
+
+5️⃣ Ajoute Tailwind dans src/index.css :
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+6️⃣ Installe Laravel Echo + Pusher côté front :
+
+npm i laravel-echo pusher-js
+
+ÉTAPE 3 : Configurer WebSockets côté Laravel
+
+1️⃣ Publier la configuration :
+
+php artisan vendor:publish --provider="BeyondCode\LaravelWebSockets\WebSocketsServiceProvider"
+
+
+2️⃣ Config .env pour Pusher :
+
+BROADCAST_DRIVER=pusher
+PUSHER_APP_ID=apcd
+PUSHER_APP_KEY=apcdkey
+PUSHER_APP_SECRET=apcdsecret
+PUSHER_HOST=127.0.0.1
+PUSHER_PORT=6001
+PUSHER_SCHEME=http
+PUSHER_APP_CLUSTER=mt1
+
+
+3️⃣ Config config/broadcasting.php :
+
+'pusher' => [
+    'driver' => 'pusher',
+    'key' => env('PUSHER_APP_KEY'),
+    'secret' => env('PUSHER_APP_SECRET'),
+    'app_id' => env('PUSHER_APP_ID'),
+    'options' => [
+        'cluster' => env('PUSHER_APP_CLUSTER'),
+        'useTLS' => false,
+        'host' => env('PUSHER_HOST'),
+        'port' => env('PUSHER_PORT'),
+        'scheme' => env('PUSHER_SCHEME'),
+    ],
+],
+
+
+4️⃣ Tester le serveur :
+
+php artisan websockets:serve
+
+ÉTAPE 4 : Authentification et système d’invitation
+1️⃣ Migration invitation_codes
+Schema::create('invitation_codes', function (Blueprint $table) {
+    $table->id();
+    $table->string('code')->unique();
+    $table->foreignId('created_by')->constrained('users')->onDelete('cascade');
+    $table->foreignId('used_by')->nullable()->constrained('users')->onDelete('set null');
+    $table->timestamp('expires_at')->nullable();
+    $table->boolean('used')->default(false);
+    $table->timestamp('used_at')->nullable();
+    $table->timestamps();
+});
+
+
+Puis :
+
+php artisan migrate
+
+2️⃣ Modèle InvitationCode
+class InvitationCode extends Model
+{
+    use HasFactory;
+
+    protected $fillable = ['code','created_by','used_by','expires_at','used','used_at'];
+
+    protected $casts = [
+        'expires_at' => 'datetime',
+        'used_at' => 'datetime',
+        'used' => 'boolean',
+    ];
+
+    public function creator() { return $this->belongsTo(User::class,'created_by'); }
+    public function user() { return $this->belongsTo(User::class,'used_by'); }
+}
+
+3️⃣ AdminController pour générer un code
+public function generateInvitation(Request $request)
+{
+    $code = bin2hex(random_bytes(5));
+
+    $invitation = InvitationCode::create([
+        'code' => $code,
+        'created_by' => auth()->id(),
+        'expires_at' => $request->expires_at,
+    ]);
+
+    return response()->json(['code' => $invitation->code]);
+}
+
+4️⃣ Middleware CheckInvitationCode
+public function handle(Request $request, Closure $next)
+{
+    $code = $request->input('invitation_code');
+
+    $invitation = InvitationCode::where('code',$code)
+        ->where('used',false)
+        ->where(fn($q)=>$q->whereNull('expires_at')->orWhere('expires_at','>',now()))
+        ->first();
+
+    if(!$invitation){
+        return response()->json(['error'=>'Code invalide ou expiré'],403);
+    }
+
+    $request->invitation = $invitation;
+    return $next($request);
+}
+
+5️⃣ Enregistrer le middleware dans Kernel.php
+protected $routeMiddleware = [
+    'auth' => \App\Http\Middleware\Authenticate::class,
+    'guest' => \App\Http\Middleware\RedirectIfAuthenticated::class,
+    'check.invitation' => \App\Http\Middleware\CheckInvitationCode::class,
+];
+
+6️⃣ Exemple de route protégée
+Route::post('/register',[AuthController::class,'register'])
+    ->middleware(['guest','check.invitation']);
+
+ÉTAPE 5 : Frontend React + TypeScript
+1️⃣ Axios instance (src/api/axios.ts)
+import axios from 'axios';
+
+export const api = axios.create({
+  baseURL: 'http://127.0.0.1:8000/api',
+  withCredentials: true,
+});
+
+2️⃣ Installer React Router, React Query et Zustand
+npm i react-router-dom@6 @tanstack/react-query zustand
+
+3️⃣ Installer Echo + Pusher (src/echo.ts)
+import Echo from 'laravel-echo';
+
+export const echo = new Echo({
+  broadcaster: 'pusher',
+  key: import.meta.env.VITE_PUSHER_APP_KEY,
+  wsHost: import.meta.env.VITE_PUSHER_HOST,
+  wsPort: Number(import.meta.env.VITE_PUSHER_PORT),
+  forceTLS: false,
+  disableStats: true,
+});
+
+4️⃣ Variables VITE (.env frontend)
+VITE_PUSHER_APP_KEY=apcdkey
+VITE_PUSHER_HOST=127.0.0.1
+VITE_PUSHER_PORT=6001
+VITE_PUSHER_SCHEME=http
+VITE_PUSHER_APP_CLUSTER=mt1
+
+5️⃣ Tester un chat instantané
+
+Exemple composant React :
+
+import { useEffect } from 'react';
+import { echo } from '../echo';
+
+const ChatTest = () => {
+  useEffect(() => {
+    echo.channel('chat')
+        .listen('MessageSent',(e:any)=>{
+          console.log('Nouveau message reçu :', e);
+        });
+  }, []);
+
+  return <div>Test WebSocket Chat</div>;
+};
+
+export default ChatTest;
+
+
+Backend Laravel :
+
+php artisan make:event MessageSent
+
+class MessageSent implements ShouldBroadcast
+{
+    use Dispatchable, InteractsWithSockets, SerializesModels;
+
+    public $message;
+
+    public function __construct($message){ $this->message = $message; }
+
+    public function broadcastOn(){ return new Channel('chat'); }
+}
+
+
+ÉTAPE 1 : Authentification Admin (Backend)
+1️⃣ Migration et modèle User
+
+Laravel a déjà une table users. Assure-toi qu’elle contient un champ is_admin :
+
+php artisan make:migration add_is_admin_to_users_table --table=users
+
+
+Migration :
+
+public function up(): void
+{
+    Schema::table('users', function (Blueprint $table) {
+        $table->boolean('is_admin')->default(false);
+    });
+}
+
+public function down(): void
+{
+    Schema::table('users', function (Blueprint $table) {
+        $table->dropColumn('is_admin');
+    });
+}
+
+
+Puis :
+
+php artisan migrate
+
+2️⃣ Créer le controller d’authentification Admin
+php artisan make:controller AuthController
+
+
+Dans AuthController.php :
+
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Hash;
+use App\Models\User;
+
+class AuthController extends Controller
+{
+    public function login(Request $request)
+    {
+        $request->validate([
+            'email' => 'required|email',
+            'password' => 'required'
+        ]);
+
+        $user = User::where('email', $request->email)->first();
+
+        if(!$user || !Hash::check($request->password, $user->password)){
+            return response()->json(['message'=>'Identifiants invalides'], 401);
+        }
+
+        if(!$user->is_admin){
+            return response()->json(['message'=>'Accès refusé'], 403);
+        }
+
+        $token = $user->createToken('admin-token')->plainTextToken;
+
+        return response()->json(['user'=>$user, 'token'=>$token]);
+    }
+
+    public function logout(Request $request)
+    {
+        $request->user()->currentAccessToken()->delete();
+        return response()->json(['message'=>'Déconnecté']);
+    }
+}
+
+3️⃣ Routes API pour l’admin
+
+Dans routes/api.php :
+
+use App\Http\Controllers\AuthController;
+
+Route::post('/admin/login',[AuthController::class,'login']);
+Route::middleware('auth:sanctum')->post('/admin/logout',[AuthController::class,'logout']);
+
+ÉTAPE 2 : Middleware pour Admin
+
+Pour sécuriser les routes admin :
+
+php artisan make:middleware IsAdmin
+
+
+Dans app/Http/Middleware/IsAdmin.php :
+
+public function handle(Request $request, Closure $next)
+{
+    if(!$request->user() || $request->user()->role !== 'admin'){
+        return response()->json(['message'=>'Accès non autorisé'],403);
+    }
+    return $next($request);
+}
+
+
+Enregistre-le dans Kernel.php :
+
+'admin' => \App\Http\Middleware\IsAdmin::class,
+
+ÉTAPE 3 : Dashboard Admin – Génération de codes d’invitation
+1️⃣ Controller pour les codes d’invitation
+php artisan make:controller InvitationController
+
+
+Dans InvitationController.php :
+
+use App\Models\InvitationCode;
+
+class InvitationController extends Controller
+{
+    public function generate(Request $request)
+    {
+        $request->validate([
+            'expires_at' => 'nullable|date|after:now'
+        ]);
+
+        $code = bin2hex(random_bytes(5));
+
+        $invitation = InvitationCode::create([
+            'code' => $code,
+            'created_by' => $request->user()->id,
+            'expires_at' => $request->expires_at,
+        ]);
+
+        return response()->json(['code'=>$invitation->code]);
+    }
+
+    public function list()
+    {
+        $codes = InvitationCode::with('creator','user')->latest()->get();
+        return response()->json($codes);
+    }
+}
+
+2️⃣ Routes API pour invitation
+use App\Http\Controllers\InvitationController;
+
+Route::middleware(['auth:sanctum','admin'])->group(function(){
+    Route::post('/admin/invitation/generate',[InvitationController::class,'generate']);
+    Route::get('/admin/invitations',[InvitationController::class,'list']);
+});
+
+ÉTAPE 4 : Frontend – Connexion Admin
+
+1️⃣ Crée un composant AdminLogin.tsx :
+
+import { useState } from 'react';
+import { api } from '../api/axios';
+
+export default function AdminLogin() {
+    const [email,setEmail] = useState('');
+    const [password,setPassword] = useState('');
+    const [error,setError] = useState('');
+
+    const handleLogin = async () => {
+        try {
+            const res = await api.post('/admin/login',{email,password});
+            localStorage.setItem('admin_token',res.data.token);
+            alert('Connecté avec succès !');
+        } catch(e:any){
+            setError(e.response?.data?.message || 'Erreur de connexion');
+        }
+    };
+
+    return (
+        <div className="max-w-md mx-auto mt-20">
+            <h1 className="text-2xl font-bold mb-4">Connexion Admin</h1>
+            <input type="email" placeholder="Email" value={email} onChange={e=>setEmail(e.target.value)} className="border p-2 w-full mb-2"/>
+            <input type="password" placeholder="Mot de passe" value={password} onChange={e=>setPassword(e.target.value)} className="border p-2 w-full mb-2"/>
+            <button onClick={handleLogin} className="bg-blue-500 text-white px-4 py-2 rounded">Se connecter</button>
+            {error && <p className="text-red-500 mt-2">{error}</p>}
+        </div>
+    );
+}
+
+ÉTAPE 5 : Frontend – Dashboard Admin
+
+1️⃣ Crée un composant AdminDashboard.tsx :
+
+import { useEffect, useState } from 'react';
+import { api } from '../api/axios';
+
+export default function AdminDashboard() {
+    const [codes,setCodes] = useState<string[]>([]);
+    const [newCode,setNewCode] = useState('');
+
+    const fetchCodes = async () => {
+        const res = await api.get('/admin/invitations',{
+            headers: { Authorization: `Bearer ${localStorage.getItem('admin_token')}` }
+        });
+        setCodes(res.data.map((c:any)=>c.code));
+    };
+
+    const generateCode = async () => {
+        const res = await api.post('/admin/invitation/generate',{},{
+            headers: { Authorization: `Bearer ${localStorage.getItem('admin_token')}` }
+        });
+        setNewCode(res.data.code);
+        fetchCodes();
+    };
+
+    useEffect(()=>{ fetchCodes(); },[]);
+
+    return (
+        <div className="max-w-2xl mx-auto mt-10">
+            <h1 className="text-2xl font-bold mb-4">Dashboard Admin</h1>
+            <button onClick={generateCode} className="bg-green-500 text-white px-4 py-2 rounded mb-4">Générer un code d'invitation</button>
+            {newCode && <p className="text-blue-500">Nouveau code : {newCode}</p>}
+            <h2 className="mt-4 font-bold">Codes existants :</h2>
+            <ul>
+                {codes.map((code,i)=><li key={i}>{code}</li>)}
+            </ul>
+        </div>
+    );
+}
+
+
+1️⃣ Règles d’adhésion
+
+Communauté principale
+
+Pour créer une sous-communauté ou un groupe dans cette communauté, il faut être membre de la communauté.
+
+Pour devenir membre : on envoie une demande. L’admin de la communauté peut valider ou refuser.
+
+Sous-communauté
+
+Pour créer un groupe dans une sous-communauté, il faut être membre de la sous-communauté.
+
+L’adhésion se fait également par demande validée par l’admin de la sous-communauté.
+
+Groupes
+
+Pour écrire des messages, il faut être membre du groupe.
+
+L’adhésion se fait par demande validée par l’admin du groupe.
+
+Hiérarchie
+
+Membre d’une communauté → peut être ajouté à une sous-communauté ou groupe de cette communauté.
+
+Membre d’une sous-communauté → peut créer ou rejoindre des groupes de cette sous-communauté.
+
+
+Pour la gestion des groupes, communautes, sous-communautes, messages:
+Migrations (tables de la base de données)
+Fichier	Table	Description
+create_communautes_table.php	communautes	Stocke les communautés et sous‑communautés. parent_id permet de créer des sous‑communautés.
+create_groupes_table.php	groupes	Stocke les groupes rattachés à une communauté ou sous‑communauté.
+create_groupe_user_table.php	groupe_user	Table pivot pour gérer les membres d’un groupe.
+create_messages_table.php	messages	Stocke les messages postés dans un groupe (texte, image, vidéo).
+create_communaute_user_table.php	communaute_user	Table pivot pour gérer les membres d’une communauté.
+create_demande_adhesion_table.php	demande_adhesion	Stocke les demandes d’adhésion aux communautés, sous‑communautés et groupes avec leur statut (en attente, accepté, refusé).
+2️⃣ Modèles Eloquent
+Modèle	Table liée	Relations principales
+Communaute	communautes	hasMany sous‑communautés, hasMany groupes, belongsToMany users
+Groupe	groupes	belongsTo communauté, belongsToMany users, hasMany messages
+Message	messages	belongsTo groupe, belongsTo user
+User	users	belongsToMany communautés, belongsToMany groupes
+DemandeAdhesion	demande_adhesion	belongsTo user, belongsTo communaute ou groupe
+3️⃣ Controllers
+Controller	Actions principales
+CommunauteController	Liste des communautés, création (admin), affichage d’une communauté avec ses sous‑communautés et groupes
+GroupeController	Liste des groupes, création (admin), affichage des messages
+DemandeAdhesionController	Envoyer demande, accepter/refuser demande (admin)
+MessageController	Ajouter message dans un groupe, récupération des messages
+
+
+
+
+1️⃣ Structure des composants
+
+src/
+│
+├── pages/
+│   ├── CommunautesPage.tsx         # Liste de toutes les communautés & sous-communautés
+│   ├── CommunityDetailPage.tsx     # Détails d’une communauté avec sous-communautés et groupes
+│   ├── GroupChatPage.tsx           # Discussion d’un groupe (messages + header style WhatsApp)
+│
+├── components/
+│   ├── ui/
+│   │   ├── Avatar.tsx              # Affiche photo de profil circulaire (fallback si vide)
+│   │   ├── Button.tsx              # Boutons stylés (primaire, secondaire, danger, icône)
+│   │   ├── Modal.tsx               # Popup générique
+│   │   ├── Dropdown.tsx            # Menu contextuel (quitter groupe, gérer membres)
+│   │
+│   ├── group/
+│   │   ├── GroupCard.tsx           # Carte avec image, nom, nb membres
+│   │   ├── GroupHeader.tsx         # Header WhatsApp (image + nom + membres)
+│   │   ├── GroupDetails.tsx        # Détails groupe : desc, ajout membre, quitter, médias
+│   │   ├── MemberList.tsx          # Liste des membres
+│   │   ├── MediaGallery.tsx        # Galerie photos/vidéos
+│   │   ├── MessageList.tsx         # Liste messages
+│   │   ├── MessageInput.tsx        # Champ d’envoi message
+│
+├── api/
+│   ├── axios.ts                    # Config axios avec token
+│   ├── communauteApi.ts            # Requêtes API communautés
+│   ├── groupeApi.ts                # Requêtes API groupes
+│   ├── messageApi.ts               # Requêtes API messages
+│
+├── context/
+│   ├── AuthContext.tsx              # Gestion connexion + rôle (admin ou non)
+│
+└── types/
+    ├── communaute.ts
+    ├── groupe.ts
+    ├── message.ts
